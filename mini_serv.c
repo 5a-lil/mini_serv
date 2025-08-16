@@ -98,14 +98,13 @@ int main(int argc, char **argv)
     
     FD_ZERO(&mainfds);
     FD_SET(serv_sock, &mainfds);
-    for (size_t i = 0; i < MAX_CLIENTS; i++)
-        clients[i] = -1;
+    memset(clients, -1, sizeof(clients));
     clients[0] = serv_sock;
 
     if (setsockopt(serv_sock, SOL_SOCKET, SO_REUSEADDR, &opt_val, sizeof(opt_val)) < 0) { printf("[ERROR] : setsockopt failed\n"); return 1; }
 
-    bzero(&serv_addr, sizeof(serv_addr));
-    bzero(&cli_addr, sizeof(cli_addr));
+    memset(&cli_addr, 0, sizeof(cli_addr));
+    memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(atoi(argv[1]));
 
