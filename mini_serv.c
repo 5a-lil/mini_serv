@@ -1,157 +1,196 @@
-
-#include <stdio.h>
-#include <stdlib.h>
+#include <errno.h>
+#include <string.h>
 #include <unistd.h>
-#include <sys/types.h>
+#include <stdio.h>
+#include <signal.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <sys/select.h>
+#include <netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <string.h>
-#include <strings.h>
-#include <arpa/inet.h>
-#include <sys/select.h>
-#include <signal.h>
 
-#define BUF_SIZE 4096
-#define MAX_CLIENTS 4096
+#define MAX_CLI 10
+
+#define fatal_error err("Fatal error\n")
+#define num_args_error err("Wrong number of arguments\n")
 
 int program = 1;
 
-void sigint_handler(int sig)
-{
+void sigint_handler(int sig) {
     (void)sig;
     program = 0;
 }
 
-char *strjoin(const char *frst, const char *scnd) {
-    char *res;
+typedef struct client {
+	int id;
+	int fd;
+	char *buf;
+	char *msg;
+	char to_send[4096];
+} client;
 
-    res = malloc((strlen(frst) + strlen(scnd)) + 1);
-    if (!res) return NULL;
+client clients[MAX_CLI];
+char recv_buf[4096 + 1];
+fd_set main_fds, write_fds, read_fds;
+int max_fd;
 
-    size_t i = 0;
-    while (*frst)
-        res[i++] = *frst++;
-    while (*scnd)
-        res[i++] = *scnd++;
-    res[i] = '\0';
-    return res;
-}
-
-size_t num_len(int num, int len)
+int extract_message(char **buf, char **msg)
 {
-    if (num == 0)   
-        return len;
-    return (num_len(num / 10, len + 1));
+	char	*newbuf;
+	int	i;
+
+	*msg = 0;
+	if (*buf == 0)
+		return (0);
+	i = 0;
+	while ((*buf)[i])
+	{
+		if ((*buf)[i] == '\n')
+		{
+			newbuf = calloc(1, sizeof(*newbuf) * (strlen(*buf + i + 1) + 1));
+			if (newbuf == 0)
+				return (-1);
+			strcpy(newbuf, *buf + i + 1);
+			*msg = *buf;
+			(*msg)[i + 1] = 0;
+			*buf = newbuf;
+			return (1);
+		}
+		i++;
+	}
+	return (0);
 }
 
-char *my_itoa(int num)
+char *str_join(char *buf, char *add)
 {
-    char *res;
-    size_t size = num_len(num, 0);
-    res = malloc(size * sizeof(char) + 1);
-    for (size_t i = 0; i < size; i++) {
-        res[size - i - 1] = num % 10 + '0';
-        num /= 10;
-    }
-    res[size] = '\0';
-    return res;
+	char	*newbuf;
+	int		len;
+
+	if (buf == 0)
+		len = 0;
+	else
+		len = strlen(buf);
+	newbuf = malloc(sizeof(*newbuf) * (len + strlen(add) + 1));
+	if (newbuf == 0)
+		return (0);
+	newbuf[0] = 0;
+	if (buf != 0)
+		strcat(newbuf, buf);
+	free(buf);
+	strcat(newbuf, add);
+	return (newbuf);
 }
 
-void send_to_clients(int clients[MAX_CLIENTS], int sender, char *to_send) {
-    char *sender_char = my_itoa(sender);
-    char *temp = strjoin(sender_char, " : ");
-    char *final_msg = strjoin(temp, to_send);
-    free(temp);
-    temp = final_msg;
-    final_msg = strjoin(final_msg, "\n");
-    for (size_t i = 1; i < MAX_CLIENTS; i++)
-        if (clients[i] != -1 && clients[i] != sender)
-            send(clients[i], final_msg, strlen(final_msg), 0);
-    free(sender_char);
-    free(temp);
-    free(final_msg);
-}
-
-int main(int argc, char **argv)
+void serv_shutdown()
 {
-    char *errors[2] = {"port", "ip address"};
-    if (argc < 3) {
-        printf("[ERROR] : no %s given\n", errors[argc - 1]);
-        return 1;
-    }
-    if (atoi(argv[1]) <= 0 || atoi(argv[1]) > 65535) {
-        printf("[ERROR] : port %s is too large\n", argv[1]);
-        return 1;
-    }
-    signal(SIGINT, sigint_handler);
+	for (size_t i = 0; i < MAX_CLI; i++)
+		if (clients[i].fd != -1) { close(clients[i].fd); free(clients[i].buf); }
+}
 
-    struct sockaddr_in serv_addr, cli_addr;
-    int opt_val = 1;
-    socklen_t cli_len = sizeof(cli_addr);
-    int serv_sock;
-    if ((serv_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) { printf("[ERROR] : socket failed\n"); return 1; }
+void err(char *msg)
+{
+	serv_shutdown();
+	write(2, msg, strlen(msg));
+	exit(1);
+}
 
-    fd_set mainfds, tempfds;
-    int clients[MAX_CLIENTS];
-    int nfds = serv_sock;
-    
-    FD_ZERO(&mainfds);
-    FD_SET(serv_sock, &mainfds);
-    memset(clients, -1, sizeof(clients));
-    clients[0] = serv_sock;
+void send_msg_to_clients(char *msg, int sender)
+{
+	for (size_t i = 1; i < MAX_CLI; i++)
+		if (clients[i].id != -1 && clients[i].id != sender)
+		{
+			size_t sent = 0;
+			while (sent < strlen(msg))
+				sent += send(clients[i].fd, msg, strlen(msg), 0);
+		}
+	memset(msg, 0, strlen(msg));
+}
 
-    if (setsockopt(serv_sock, SOL_SOCKET, SO_REUSEADDR, &opt_val, sizeof(opt_val)) < 0) { printf("[ERROR] : setsockopt failed\n"); return 1; }
+int main(int argc, char **argv) 
+{
+	if (argc != 2) num_args_error;
+	signal(SIGINT, sigint_handler);
 
-    memset(&cli_addr, 0, sizeof(cli_addr));
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(atoi(argv[1]));
+	int serv_fd, cli_fd;
+	struct sockaddr_in serv_addr, cli_addr; 
+	socklen_t cli_addr_len = sizeof(cli_addr);
+	
+	serv_fd = socket(AF_INET, SOCK_STREAM, 0); 
+	if (serv_fd == -1) fatal_error;
+	memset(&serv_addr, 0, sizeof(serv_addr));
 
-    if (inet_pton(AF_INET, argv[2], &serv_addr.sin_addr) <= 0) { printf("[ERROR] : wrong ip address\n"); return 1; }
+	serv_addr.sin_family = AF_INET; 
+	serv_addr.sin_addr.s_addr = htonl(2130706433); //127.0.0.1
+	serv_addr.sin_port = htons(atoi(argv[1])); 
 
-    if (bind(serv_sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) { printf("[ERROR] : bind failed\n"); return 1; }
+	FD_ZERO(&main_fds);
+	FD_SET(serv_fd, &main_fds);
+	max_fd = serv_fd;
 
-    if (listen(serv_sock, 10) < 0) { printf("[ERROR] : listen failed\n"); return 1; }
+	memset(clients, -1, sizeof(clients));
+	clients[0].id = -2;
+	clients[0].fd = serv_fd;
+	clients[0].buf = NULL;
+	for (size_t i = 1; i < MAX_CLI; i++)
+	{
+		clients[i].buf = NULL;
+		clients[i].msg = NULL;
+		memset(clients[i].to_send, 0, sizeof(clients[i].to_send));
+	}
 
-    while (program)
-    {
-        tempfds = mainfds;
-        int ret = select(nfds + 1, &tempfds, NULL, NULL, NULL);
-        if (ret < 0) {
-            if (program) return (printf("[ERROR] : select failed\n"), 1);
-            else { printf("\r[LOG] : server shutdown...\n"); break; }
-        }
-        if (FD_ISSET(serv_sock, &tempfds))
-        {
-            int new_cli_sock;
-            if ((new_cli_sock = accept(serv_sock, (struct sockaddr *)&cli_addr, &cli_len)) < 0) { printf("[ERROR] : problem occured with accept when connecting to server\n"); continue; }
-            FD_SET(new_cli_sock, &mainfds);
-            for (size_t i = 0; i < MAX_CLIENTS; i++)
-                if (clients[i] == -1) { clients[i] = new_cli_sock; break; }
-            if (new_cli_sock > nfds) nfds = new_cli_sock;
-            printf("[LOG] : new client connected with socket %d\n", new_cli_sock);
-        }
-        for (size_t i = 1; i < MAX_CLIENTS; i++) 
-        {
-            if (clients[i] != -1 && FD_ISSET(clients[i], &tempfds))
-            {
-                char buf[BUF_SIZE];
-                int r;
-                if ((r = recv(clients[i], buf, sizeof(buf), 0)) < 0) { printf("[ERROR] : recv failed for socket %d\n", clients[i]); continue; }
-                if (r == 0) {
-                    FD_CLR(clients[i], &mainfds);
-                    printf("[LOG] : client %d disconnected\n", clients[i]); 
-                    close(clients[i]);
-                    clients[i] = -1;
-                    continue;
-                }
-                buf[r - 1] = '\0'; // r - 1 to replace the \n
-                send_to_clients(clients, clients[i], buf);
-                printf("[LOG] : %d sended \"%s\"\n", clients[i], buf);
-            }
-        }
-    }
-    for (size_t i = 0; i < MAX_CLIENTS; i++)
-        if (clients[i] != -1) { close(clients[i]); clients[i] = -1; }
+	if ((bind(serv_fd, (const struct sockaddr *)&serv_addr, sizeof(serv_addr))) != 0) fatal_error;
+	if (listen(serv_fd, 10) != 0) fatal_error;
+
+	while (program)
+	{
+		read_fds = write_fds = main_fds;
+		if (select(max_fd + 1, &read_fds, &write_fds, NULL, NULL) == -1) fatal_error;
+		for (size_t i = 0; i < MAX_CLI; i++)
+		{
+			if (!FD_ISSET(clients[i].fd, &read_fds)) continue;
+			if (clients[i].fd == serv_fd)
+			{
+				cli_fd = accept(clients[i].fd, (struct sockaddr *)&cli_addr, &cli_addr_len);
+				if (cli_fd == -1) fatal_error;
+				FD_SET(cli_fd, &main_fds);
+				for (size_t i = 0; i < MAX_CLI; i++)
+					if (clients[i].id == -1) 
+					{ 
+						clients[i].id = i - 1; 
+						clients[i].fd = cli_fd; 
+						sprintf(clients[i].to_send, "server: client %d has just arrived\n", clients[i].id);
+						send_msg_to_clients(clients[i].to_send, clients[i].id);
+						break; 
+					}
+				max_fd = cli_fd > max_fd ? cli_fd : max_fd;
+			}
+			else
+			{
+				int r = recv(clients[i].fd, recv_buf, 4096, 0);
+				if (r <= 0)
+				{
+					FD_CLR(clients[i].fd, &main_fds);
+					close(clients[i].fd); clients[i].fd = -1;
+					free(clients[i].buf);
+					sprintf(clients[i].to_send, "server: client %d has left\n", clients[i].id);
+					send_msg_to_clients(clients[i].to_send, clients[i].id);
+				}
+				else
+				{
+					recv_buf[r] = '\0';
+					clients[i].buf = str_join(clients[i].buf, recv_buf);
+					while (extract_message(&clients[i].buf, &clients[i].msg))
+					{
+						sprintf(clients[i].to_send, "client %d: %s", clients[i].id, clients[i].msg);
+						send_msg_to_clients(clients[i].to_send, clients[i].id);
+						free(clients[i].msg);
+					}
+					memset(recv_buf, 0, sizeof(recv_buf));
+				}
+			}
+		}
+	}
+	serv_shutdown();
+	return (0);
 }
