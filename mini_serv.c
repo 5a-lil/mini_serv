@@ -27,11 +27,11 @@ typedef struct client {
 	int fd;
 	char *buf;
 	char *msg;
-	char to_send[4096];
+	char to_send[100];
 } client;
 
 client clients[MAX_CLI];
-char recv_buf[4096 + 1];
+char recv_buf[10000000];
 fd_set main_fds, write_fds, read_fds;
 int max_fd;
 
@@ -97,12 +97,17 @@ void err(char *msg)
 
 void send_msg_to_clients(char *msg, int sender)
 {
+	int msg_len = strlen(msg);
 	for (size_t i = 1; i < MAX_CLI; i++)
 		if (clients[i].id != -1 && clients[i].id != sender)
 		{
-			size_t sent = 0;
-			while (sent < strlen(msg))
-				sent += send(clients[i].fd, msg, strlen(msg), 0);
+			size_t total_sent = 0;
+			while (total_sent < msg_len)
+			{
+				size_t sent = send(clients[i].fd, msg, strlen(msg), 0);
+				if (sent < 0) fatal_error;
+				total_sent += sent;
+			}
 		}
 	memset(msg, 0, strlen(msg));
 }
@@ -182,8 +187,9 @@ int main(int argc, char **argv)
 					clients[i].buf = str_join(clients[i].buf, recv_buf);
 					while (extract_message(&clients[i].buf, &clients[i].msg))
 					{
-						sprintf(clients[i].to_send, "client %d: %s", clients[i].id, clients[i].msg);
+						sprintf(clients[i].to_send, "client %d: ", clients[i].id);
 						send_msg_to_clients(clients[i].to_send, clients[i].id);
+						send_msg_to_clients(clients[i].msg, clients[i].id);
 						free(clients[i].msg);
 					}
 					memset(recv_buf, 0, sizeof(recv_buf));
