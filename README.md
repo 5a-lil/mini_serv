@@ -13,7 +13,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#define MAX_CLI 10
+#define MAX_CLI 4096
 
 #define fatal_error err("Fatal error\n")
 #define num_args_error err("Wrong number of arguments\n")
