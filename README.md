@@ -1,4 +1,4 @@
-# 42_exam06
+# mini_serv.c
 
 ```c
 #include <errno.h>
