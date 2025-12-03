@@ -15,7 +15,7 @@ $ cc mini_serv.c -o serv
 ```
 then:
 ```
-$ ./serv
+$ ./serv <port>
 ```
 
 Have fun with it ! 🔥
